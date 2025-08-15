@@ -1,0 +1,53 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+package-lock.json
+yarn.lock
+.pnpm-lock.yaml
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs
+*.log
+*.log.*
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+
+# Build outputs
+dist/
+build/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-data/
+*.pid
+*.seed
+.dockerignore
+
+# VSCode
+.vscode/
+.history/
+
+# Others
+*.swp
+*.swo

@@ -1,0 +1,424 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Micro-Football</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      display: flex;
+      min-height: 100vh;
+    }
+
+    #left {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0b3d0b;
+    }
+
+    #right {
+      width: 280px;
+      padding: 12px;
+      background: #111;
+      color: #eee;
+    }
+
+    #cv {
+      width: 960px;
+      height: 576px;
+      border: 4px solid #fff;
+      background: #167f16;
+    }
+
+    label,
+    input,
+    button {
+      display: block;
+      width: 100%;
+      margin: 6px 0;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .row>* {
+      flex: 1;
+    }
+
+    #log {
+      height: 140px;
+      overflow: auto;
+      background: #000;
+      padding: 8px;
+      font-size: 12px;
+    }
+
+    .muted {
+      opacity: .7;
+      font-size: 12px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      font-size: 12px;
+      margin-left: 6px;
+    }
+
+    .ok {
+      background: #0c8;
+      color: #012;
+    }
+
+    .ko {
+      background: #c33;
+      color: #fff;
+    }
+
+    .hint {
+      font-size: 12px;
+      margin: 4px 0;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="left">
+    <canvas id="cv"></canvas>
+  </div>
+  <div id="right">
+    <div class="row">
+      <input id="name" placeholder="Nombre" />
+      <input id="room" placeholder="Room" value="demo" />
+    </div>
+    <button id="join">Join</button>
+
+    <div><strong>Equipo:</strong> <span id="team">-</span></div>
+    <div><strong>Fase:</strong> <span id="phase">-</span></div>
+    <div><strong>Tiempo:</strong> <span id="tleft">-</span> ms</div>
+
+    <div class="hint">
+      Estado plan —
+      Home: <span id="pr-home" class="pill ko">pendiente</span>
+      Away: <span id="pr-away" class="pill ko">pendiente</span>
+    </div>
+
+    <div class="row">
+      <button id="clear">Limpiar plan</button>
+      <button id="send">Enviar plan</button>
+    </div>
+    <div class="muted">Izq: trazar ruta. Der: dirección y potencia de patada (arrastre).</div>
+    <div id="log"></div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const cv = document.getElementById('cv');
+    const ctx = cv.getContext('2d');
+    const nameEl = document.getElementById('name');
+    const roomEl = document.getElementById('room');
+    const joinBtn = document.getElementById('join');
+    const teamEl = document.getElementById('team');
+    const phaseEl = document.getElementById('phase');
+    const tleftEl = document.getElementById('tleft');
+    const clearBtn = document.getElementById('clear');
+    const sendBtn = document.getElementById('send');
+    const logEl = document.getElementById('log');
+    const prHome = document.getElementById('pr-home');
+    const prAway = document.getElementById('pr-away');
+
+    const socket = io();
+    let myTeam = 'spectator';
+    let mySocketId = null;
+
+    // Estado sincronizado desde server
+    let state = {
+      phase: '-', phaseEndsAt: 0, tick: 0,
+      field: { w: 100, h: 60 },
+      ball: { x: 50, y: 30, vx: 0, vy: 0, r: 0.6 },
+      players: {}, controllers: { home: null, away: null },
+      planReady: { home: false, away: false }
+    };
+
+    // Plan local (solo para mi equipo)
+    // plans[pid] = { path:[{x,y}], kick:{dx,dy,power} }
+    const plans = {};
+
+    // Canvas HiDPI
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = cv.clientWidth || 960;
+      const cssH = cv.clientHeight || 576;
+      cv.width = cssW * dpr;
+      cv.height = cssH * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    const FIELD_PAD = 20;
+    function fieldToCanvas(x, y) {
+      const W = cv.clientWidth || 960;
+      const H = cv.clientHeight || 576;
+      const sx = (W - FIELD_PAD * 2) / state.field.w;
+      const sy = (H - FIELD_PAD * 2) / state.field.h;
+      return { x: FIELD_PAD + x * sx, y: FIELD_PAD + y * sy, sx, sy };
+    }
+    function canvasToField(cx, cy) {
+      const W = cv.clientWidth || 960;
+      const H = cv.clientHeight || 576;
+      const sx = (W - FIELD_PAD * 2) / state.field.w;
+      const sy = (H - FIELD_PAD * 2) / state.field.h;
+      return { x: (cx - FIELD_PAD) / sx, y: (cy - FIELD_PAD) / sy };
+    }
+
+    // Conexión
+    socket.on('connect', () => { mySocketId = socket.id; });
+    socket.on('join_ack', (m) => {
+      if (m.error) { log('join error: ' + m.error); return; }
+      myTeam = m.team; teamEl.textContent = myTeam;
+    });
+    socket.on('plan_ack', (m) => log('plan_ack: ' + JSON.stringify(m)));
+    socket.on('phase_change', (m) => { state.phase = m.phase; state.phaseEndsAt = m.phaseEndsAt; });
+    socket.on('room_state', (s) => { state = { ...state, ...s }; });
+
+    joinBtn.onclick = () => {
+      const name = (nameEl.value || 'Player').trim();
+      const room = (roomEl.value || 'demo').trim();
+      socket.emit('join_room', { roomId: room, name });
+      joinBtn.disabled = true;
+    };
+
+    clearBtn.onclick = () => { for (const pid of Object.keys(plans)) delete plans[pid]; };
+    sendBtn.onclick = () => {
+      if (myTeam !== 'home' && myTeam !== 'away') return;
+      socket.emit('set_plan', { plans });
+      log('plan enviado (' + Object.keys(plans).length + ' jugadores)');
+    };
+
+    // Interacción/edición de plan
+    let selectedPid = null;
+    let isLDown = false, isRDown = false;
+
+    cv.addEventListener('mousedown', (e) => {
+      const rect = cv.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const f = canvasToField(cx, cy);
+
+      // Seleccionar jugador propio cercano
+      let best = null, bestD = 9e9;
+      for (const p of Object.values(state.players)) {
+        if (p.team !== myTeam) continue;
+        const d = Math.hypot(f.x - p.x, f.y - p.y);
+        if (d < bestD && d <= 1.5) { best = p; bestD = d; }
+      }
+      if (best) selectedPid = best.pid;
+
+      if (e.button === 0) { // Izquierdo: path
+        isLDown = true;
+        if (selectedPid) {
+          plans[selectedPid] = plans[selectedPid] || { path: [], kick: null };
+          plans[selectedPid].path = [{ x: f.x, y: f.y }];
+        }
+      } else if (e.button === 2) { // Derecho: kick
+        isRDown = true;
+        if (selectedPid) {
+          plans[selectedPid] = plans[selectedPid] || { path: [], kick: null };
+          plans[selectedPid].kick = { dx: 0, dy: -1, power: 0.5 };
+        }
+      }
+    });
+
+    cv.addEventListener('mousemove', (e) => {
+      if (!selectedPid) return;
+      if (state.phase !== 'PLAN') return;
+      const rect = cv.getBoundingClientRect();
+      const f = canvasToField(e.clientX - rect.left, e.clientY - rect.top);
+      if (isLDown) {
+        const path = plans[selectedPid].path;
+        const last = path[path.length - 1];
+        if (!last || Math.hypot(last.x - f.x, last.y - f.y) > 0.4) {
+          path.push({ x: f.x, y: f.y });
+        }
+      } else if (isRDown) {
+        const p = state.players[selectedPid];
+        const dx = f.x - p.x, dy = f.y - p.y;
+        const L = Math.hypot(dx, dy);
+        const MAX_DRAG = 15;
+        const power = Math.max(0, Math.min(1, L / MAX_DRAG));
+        const nx = L > 0 ? dx / L : 0, ny = L > 0 ? dy / L : -1;
+        plans[selectedPid].kick = { dx: nx, dy: ny, power };
+      }
+    });
+
+    function endPointer(e) {
+      if (e.button === 0) isLDown = false;
+      if (e.button === 2) isRDown = false;
+    }
+    cv.addEventListener('mouseup', endPointer);
+    cv.addEventListener('mouseleave', () => { isLDown = false; isRDown = false; });
+    cv.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Dibujo
+    function drawField() {
+      const W = cv.clientWidth || 960, H = cv.clientHeight || 576;
+      // Césped
+      ctx.fillStyle = '#167f16';
+      ctx.fillRect(0, 0, W, H);
+
+      // Área útil (límites)
+      const tl = fieldToCanvas(0, 0);
+      const br = fieldToCanvas(state.field.w, state.field.h);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+
+      // Mitad de cancha y círculo central
+      const mid = fieldToCanvas(state.field.w / 2, 0);
+      ctx.beginPath();
+      ctx.moveTo(mid.x, tl.y);
+      ctx.lineTo(mid.x, br.y);
+      ctx.stroke();
+
+      ctx.beginPath();
+      const center = fieldToCanvas(state.field.w / 2, state.field.h / 2);
+      ctx.arc(center.x, center.y, 60, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // ==== Dibujar Arcos ====
+      const goalW = state.field?.goals?.width ?? 14;
+      const goalDepth = state.field?.goals?.depth ?? 1.8;
+
+
+      // Arco izquierdo
+      const g1Top = fieldToCanvas(0, (state.field.h - goalW) / 2);
+      const g1Bottom = fieldToCanvas(0, (state.field.h + goalW) / 2);
+      ctx.beginPath();
+      ctx.moveTo(g1Top.x, g1Top.y);
+      ctx.lineTo(g1Top.x - goalDepth * g1Top.sx, g1Top.y);
+      ctx.lineTo(g1Bottom.x - goalDepth * g1Bottom.sx, g1Bottom.y);
+      ctx.lineTo(g1Bottom.x, g1Bottom.y);
+      ctx.stroke();
+
+      // Arco derecho
+      const g2Top = fieldToCanvas(state.field.w, (state.field.h - goalW) / 2);
+      const g2Bottom = fieldToCanvas(state.field.w, (state.field.h + goalW) / 2);
+      ctx.beginPath();
+      ctx.moveTo(g2Top.x, g2Top.y);
+      ctx.lineTo(g2Top.x + goalDepth * g2Top.sx, g2Top.y);
+      ctx.lineTo(g2Bottom.x + goalDepth * g2Bottom.sx, g2Bottom.y);
+      ctx.lineTo(g2Bottom.x, g2Bottom.y);
+      ctx.stroke();
+    }
+
+
+    function drawPlayersAndBall() {
+      // Jugadores
+      for (const p of Object.values(state.players)) {
+        const c = fieldToCanvas(p.x, p.y);
+        ctx.beginPath();
+        ctx.fillStyle = p.team === 'home' ? '#1f6feb' : '#d43f3a';
+        ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+        if (p.pid === selectedPid && (myTeam === p.team)) {
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = '#ffeb3b';
+          ctx.stroke();
+        }
+      }
+      // Pelota
+      const b = state.ball;
+      const bc = fieldToCanvas(b.x, b.y);
+      ctx.beginPath();
+      ctx.fillStyle = '#ffffff';
+      ctx.arc(bc.x, bc.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    function drawPlans() {
+      // Solo planes de mi equipo
+      for (const [pid, plan] of Object.entries(plans)) {
+        const p = state.players[pid];
+        if (!p || p.team !== myTeam) continue;
+
+        const path = plan.path || [];
+        if (path.length > 1) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          const p0 = fieldToCanvas(path[0].x, path[0].y);
+          ctx.moveTo(p0.x, p0.y);
+          for (let i = 1; i < path.length; i++) {
+            const pi = fieldToCanvas(path[i].x, path[i].y);
+            ctx.lineTo(pi.x, pi.y);
+          }
+          ctx.stroke();
+        }
+
+        if (plan.kick) {
+          const start = fieldToCanvas(p.x, p.y);
+          const Lpx = 60 * plan.kick.power + 20;
+          const end = { x: start.x + plan.kick.dx * Lpx, y: start.y + plan.kick.dy * Lpx };
+
+          ctx.strokeStyle = '#ffeb3b';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(start.x, start.y);
+          ctx.lineTo(end.x, end.y);
+          ctx.stroke();
+
+          const angle = Math.atan2(end.y - start.y, end.x - start.x);
+          const ah = 8;
+          ctx.beginPath();
+          ctx.moveTo(end.x, end.y);
+          ctx.lineTo(end.x - Math.cos(angle - Math.PI / 6) * ah, end.y - Math.sin(angle - Math.PI / 6) * ah);
+          ctx.lineTo(end.x - Math.cos(angle + Math.PI / 6) * ah, end.y - Math.sin(angle + Math.PI / 6) * ah);
+          ctx.closePath();
+          ctx.fillStyle = '#ffeb3b';
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawUI() {
+      phaseEl.textContent = state.phase;
+      tleftEl.textContent = Math.max(0, state.phaseEndsAt - Date.now());
+      // badges planReady
+      prHome.textContent = state.planReady?.home ? 'listo' : 'pendiente';
+      prAway.textContent = state.planReady?.away ? 'listo' : 'pendiente';
+      prHome.className = 'pill ' + (state.planReady?.home ? 'ok' : 'ko');
+      prAway.className = 'pill ' + (state.planReady?.away ? 'ok' : 'ko');
+    }
+
+    function loop() {
+      resizeCanvas();
+      drawField();
+      drawPlayersAndBall();
+      drawPlans();
+      drawUI();
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    function log(t) {
+      const d = document.createElement('div');
+      d.textContent = t;
+      logEl.prepend(d);
+    }
+  </script>
+</body>
+
+</html>
