@@ -6,8 +6,10 @@ RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 
 # Instalar solo deps de producción
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+COPY package.json ./
+RUN npm install --omit=dev
+# ...
+
 
 # Copiar código
 COPY server ./server
