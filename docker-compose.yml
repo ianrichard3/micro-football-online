@@ -1,18 +1,18 @@
 version: "3.9"
 
 services:
-  micro-arena:
+  micro-football:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: micro-arena
+    container_name: micro-football
     ports:
-      - "3000:3000"   # Cambiá a 80:3000 si querés servir directo sin proxy
+      - "3000:3000"     # Cambia a "80:3000" si querés servir directo sin proxy
     environment:
-      - NODE_ENV=production
+      NODE_ENV: production
     restart: unless-stopped
-    # Si usás un proxy reverso (Nginx/Traefik/Caddy) en otro contenedor o en el host,
-    # dejá solo el puerto interno y publica el servicio a través del proxy.
+    # Si usás proxy reverso (Nginx/Traefik/Caddy), dejá solo la red interna y
+    # publica el servicio a través del proxy:
     # networks:
     #   - proxy
 
